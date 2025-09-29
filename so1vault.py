@@ -1,44 +1,42 @@
-import argparse, secrets, os, stat
+import argparse, secrets, os, stat, re
 from flask import Flask, redirect, url_for, render_template, request, session
 from argon2 import PasswordHasher
 from datetime import timedelta
 
+pass_hash = PasswordHasher(hash_len = 128, salt_len = 16)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-p', '--port', type=int, default=8080)
-    parser.add_argument('-m', '--master-pass', type=str)
-    parser.add_argument('--session-time', type=int, default=15)
-    parser.add_argument('--debug', action='store_true', default=False)
-    args = parser.parse_args()
 
-    pass_hash = PasswordHasher(hash_len = 128, salt_len = 16)
 
+
+def authorization(password=None):
     try:
         if os.path.exists("master_key.txt"):
             with open('master_key.txt', 'r') as f:
                 master_password = f.read()
+                return master_password
         else:
-            if args.master_pass:
-                password = args.master_pass
-                with open('master_key.txt', 'w') as f:
-                    f.write(pass_hash.hash(password))
-                os.chmod('master_key.txt', stat.S_IRWXU)
-                with open('master_key.txt', 'r') as f:
-                    master_password = f.read()
-            else:
-                print('Please enter a master password')
-                password = input()
-                with open('master_key.txt', 'w') as f:
-                    f.write(pass_hash.hash(password))
-                os.chmod('master_key.txt', stat.S_IRWXU)
-                with open('master_key.txt', 'r') as f:
-                    master_password = f.read()
+            with open('master_key.txt', 'w') as f:
+                f.write(pass_hash.hash(password))
+            os.chmod('master_key.txt', stat.S_IRWXU)
+            with open('master_key.txt', 'r') as f:
+                master_password = f.read()
+                return master_password
+
+
     except Exception as e:
-        print(e)
+        return f'<h1>{e}</h1>'
 
+def main():
+    if not os.geteuid() == 0:
+        raise Exception('must be ran as root')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', '--port', type=int, default=8080)
+    parser.add_argument('-m', '--master-pass', type=str)
+    parser.add_argument('--session-time', type=int, default=10)
+    parser.add_argument('--debug', action='store_true', default=False)
+    args = parser.parse_args()
 
-
+    pass_hash = PasswordHasher(hash_len = 128, salt_len = 16)
 
 
     web_site = Flask(__name__)
@@ -50,20 +48,43 @@ def main():
     @web_site.route('/', methods=['GET', 'POST'])
     def home():
         session.permanent = True
-        if 'authorized' in session:
-            return render_template('dashboard.html')
+        if os.path.exists('master_key.txt'):
+            return redirect(url_for('login'))
 
-        if request.method == 'POST':
+        elif request.method == 'POST':
             try:
                 site_password = request.form["master_password"]
+                authorization(site_password)
+                session['authorized'] = True
+                return redirect(url_for('dashboard'))
 
-                if pass_hash.verify(master_password, site_password):
-                    session['authorized'] = True
-                    return redirect(url_for('dashboard'))
-            except Exception:
-                return render_template("first_time.html")
+            except Exception as e:
+                return f"<h1>{e}</h1>"
+        return render_template("first.html")
 
-        return render_template("first_time.html")
+
+    @web_site.route('/login/', methods=['GET', 'POST'])
+    def login():
+        try:
+            if 'authorized' in session:
+                return redirect(url_for('dashboard'))
+
+            if os.path.exists('master_key.txt'):
+                if request.method == 'GET':
+                    return render_template('login.html')
+                else:
+                    site_password = request.form["master_password"]
+                    master_password = authorization()
+                    if pass_hash.verify(master_password, site_password):
+                        session['authorized'] = True
+                        return redirect(url_for('dashboard'))
+            return redirect(url_for('home'))
+
+
+        except Exception as e:
+            return f'<h1>{e}</h1>'
+
+
 
 
     @web_site.route('/dashboard/')
