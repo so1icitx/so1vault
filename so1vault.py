@@ -5,11 +5,15 @@ from datetime import timedelta, datetime
 from cryptography.fernet import Fernet
 pass_hash = PasswordHasher(hash_len = 128, salt_len = 16)
 
+if not os.geteuid() == 0:
+        raise Exception('must be ran as root')
+        connection.close()
+
 if not os.path.exists('passwords.db'):
     connection = sqlite3.connect('passwords.db', check_same_thread=False)
     os.chmod('passwords.db', stat.S_IRWXU)
     cursor = connection.cursor()
-    cursor.execute('create table passwords (id integer primary key autoincrement, email text, password_hash text, url text, last_modified text, first_created text)')
+    cursor.execute('create table passwords (id integer primary key autoincrement, email BLOB, password BLOB, url BLOB, last_modified text, first_created text)')
     connection.commit()
     key = Fernet.generate_key()
     with open("secret.key", 'wb') as f:
@@ -23,10 +27,11 @@ def load_key():
     with open("secret.key", 'rb') as f:
         return f.read()
 def encrypt_data(data):
+
     data = data.encode()
     key = load_key()
     fernet = Fernet(key)
-    return str(fernet.encrypt(data))
+    return fernet.encrypt(data)
 
 def authorization(password=None):
     try:
@@ -43,9 +48,6 @@ def authorization(password=None):
         connection.close()
 
 def main():
-    if not os.geteuid() == 0:
-        raise Exception('must be ran as root')
-        connection.close()
 
 
     parser = argparse.ArgumentParser()
@@ -53,6 +55,7 @@ def main():
     parser.add_argument('--session-time', type=int, default=10)
     parser.add_argument('--debug', action='store_true', default=False)
     args = parser.parse_args()
+
     web_site = Flask(__name__)
     web_site.secret_key = secrets.token_hex(128)
     web_site.permanent_session_lifetime = timedelta(minutes = args.session_time)
@@ -98,7 +101,12 @@ def main():
     @web_site.route('/dashboard/')
     def dashboard():
         if 'authorized' in session:
-            return render_template('dashboard.html')
+            key = load_key()
+            fernet = Fernet(key)
+            cursor.execute('SELECT * FROM passwords')
+            data = cursor.fetchall()
+
+            return render_template('dashboard.html', data=data, fernet=fernet)
         return redirect(url_for('home'))
 
 
@@ -111,12 +119,57 @@ def main():
                 email = request.form['email']
                 password = request.form['password']
                 url = request.form['url']
-                last_modified = datetime.now()
-                first_created = datetime.now()
-                cursor.execute('INSERT INTO passwords (email, password_hash, url, last_modified, first_created) VALUES (?, ?, ?, ?, ?)',(encrypt_data(email), encrypt_data(password), encrypt_data(url), str(last_modified), str(first_created)))
+                last_modified = datetime.now().strftime('%H:%M %d:%m:%y')
+                first_created = datetime.now().strftime('%H:%M %d:%m:%y')
+                cursor.execute('INSERT INTO passwords (email, password, url, last_modified, first_created) VALUES (?, ?, ?, ?, ?)',(encrypt_data(email), encrypt_data(password), encrypt_data(url), str(last_modified), str(first_created)))
                 connection.commit()
                 return redirect(url_for('dashboard'))
         return redirect(url_for('home'))
+
+    @web_site.route('/dashboard/delete/<int:id_num>/', methods=['POST'])
+    def delete(id_num):
+        print(id_num)
+
+        cursor.execute(f'DELETE FROM passwords WHERE id=?', (id_num,))
+        return redirect(url_for('dashboard'))
+
+    @web_site.route('/dashboard/edit/<int:id_num>', methods=['GET', 'POST'])
+    def edit(id_num):
+        key = load_key()
+        fernet = Fernet(key)
+        if request.method == 'GET':
+
+            cursor.execute('SELECT * FROM passwords WHERE id=?', (id_num,))
+            row = cursor.fetchall()
+            print(row)
+            data = {
+                'email':fernet.decrypt(row[0][1]).decode(),
+                'password':fernet.decrypt(row[0][2]).decode(),
+                'url':fernet.decrypt(row[0][3]).decode()
+
+                }
+
+
+            return render_template('edit.html', data=data)
+        else:
+            email = request.form['email'].encode()
+            password = request.form['password'].encode()
+            url = request.form['url'].encode()
+
+
+            if email:
+                cursor.execute('UPDATE passwords SET email=? WHERE id=?', (fernet.encrypt(email), id_num,))
+            if password:
+                cursor.execute('UPDATE passwords SET password=? WHERE id=?', (fernet.encrypt(password), id_num,))
+            if url:
+                cursor.execute('UPDATE passwords SET url=? WHERE id=?', (fernet.encrypt(url), id_num,))
+
+            cursor.execute('UPDATE passwords SET last_modified=? WHERE id=?', (str(datetime.now().strftime('%H:%M %d-%m-%y')), id_num,))
+            connection.commit()
+            return redirect(url_for('dashboard'))
+
+
+
 
     @web_site.errorhandler(404)
     def invalid_url(e):
